@@ -6,6 +6,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmtTime = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 const flat = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const settings = () => Store.state.settings;
 const voiceOf = (speaker) => (speaker === 'B' ? 'b' : 'a');
 
@@ -1225,11 +1226,119 @@ function voiceMessage(q) {
     : 'No Spanish voice was found in this browser. Open Habla in <strong>Microsoft Edge</strong> (best) or Google Chrome, and check that you are online.';
 }
 
+/* ---------- who is learning ---------- */
+
+// The name of the person learning now. Empty when the app has no list of people.
+const learner = () => (Store.who && Store.who.name) || '';
+const faceOf = (p) => `<span class="face c${Store.profiles.indexOf(p) % 4}">${esc(Array.from(p.name)[0].toUpperCase())}</span>`;
+
+// The top bar shows who is learning. Tapping the name opens the list of people.
+function showWho() {
+  const chip = $('#who');
+  if (!chip) return; // a page from before profiles, still in the browser's cache
+  const name = learner();
+  chip.hidden = !name;
+  chip.innerHTML = name ? `${faceOf(Store.who)}<span>${esc(name)}</span>` : '';
+  chip.setAttribute('aria-label', name ? `Learning as ${name}. Change who is learning.` : '');
+}
+
+/* No passwords: each person taps their name, and their own progress opens. */
+function WhoView(root) {
+  const people = Store.profiles;
+  const total = Course.days.length;
+  let asking = null; // the person being asked whether the progress from before profiles is theirs
+
+  const where = (s) => (!s.started ? 'Not started yet' : s.day == null ? 'Course finished' : `Day ${s.day} of ${total}`);
+  const when = (s) => (!s.started || s.daysAgo == null ? ''
+    : s.daysAgo <= 0 ? 'Practiced today' : s.daysAgo === 1 ? 'Practiced yesterday' : `Practiced ${s.daysAgo} days ago`);
+
+  function draw() {
+    const before = asking ? Store.earlier() : null;
+    if (asking && before) {
+      root.innerHTML = `<section class="card who-card">
+        <span class="kicker">One question for ${esc(asking.name)}</span>
+        <h1>Is this progress yours?</h1>
+        <p class="lead">Somebody practiced on this device before the names were added: ${plural(before.sessions, 'session')} done, ${plural(before.phrases, 'phrase')} learned.</p>
+        <div class="row left">
+          <button class="btn primary big" data-act="mine">Yes, it is mine</button>
+          <button class="btn big" data-act="notmine">No, I start at day 1</button>
+        </div>
+        <p class="small muted" style="margin-top:1rem">If it is not yours, it stays on this device for the person it belongs to.</p>
+        <div class="row left"><button class="btn ghost sm" data-act="names">← Back to the names</button></div>
+      </section>`;
+      return;
+    }
+    asking = null;
+    const now = Store.who;
+    root.innerHTML = `<section class="card who-card">
+      <span class="kicker">Habla · Spanish in 30 minutes a day</span>
+      <h1>Who is learning?</h1>
+      <p class="lead">${now ? 'Choose a name to change who is learning.' : 'Choose your name. Your own progress opens, and you continue where you stopped.'}</p>
+      <div class="people">${people.map((p, i) => {
+        const s = Store.summary(p.id);
+        const here = !!now && now.id === p.id;
+        return `<button class="person ${here ? 'on' : ''}" data-who="${esc(p.id)}">
+          ${faceOf(p)}
+          <span class="pname">${esc(p.name)}</span>
+          <span class="pinfo">${where(s)}</span>
+          <span class="plast">${here ? 'Learning now' : when(s)}</span>
+          ${i < 9 ? `<kbd>${i + 1}</kbd>` : ''}
+        </button>`;
+      }).join('')}</div>
+      <p class="small muted">Progress is saved on this device, separately for each person. There are no passwords.</p>
+    </section>`;
+  }
+
+  function enter(p, take) {
+    Store.choose(p.id);
+    if (take === true) Store.takeEarlier();
+    else if (take === false) Store.save(); // their own progress now exists, so the question is not asked again
+    micBlocked = false;
+    micFails = 0;
+    // Always open this person's own home page: the page the tab was on may belong
+    // to somebody else's place in the course.
+    if (location.hash.replace(/^#\/?/, '')) location.hash = '#/';
+    else route();
+  }
+
+  function pick(p) {
+    if (!p) return;
+    if (Store.isNew(p.id) && Store.earlier()) {
+      asking = p;
+      draw();
+      window.scrollTo(0, 0);
+    } else {
+      enter(p);
+    }
+  }
+
+  root.onclick = (e) => {
+    const tile = e.target.closest('[data-who]');
+    if (tile) { pick(people.find((p) => p.id === tile.dataset.who)); return; }
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    if (b.dataset.act === 'mine') enter(asking, true);
+    else if (b.dataset.act === 'notmine') enter(asking, false);
+    else if (b.dataset.act === 'names') { asking = null; draw(); }
+  };
+
+  draw();
+  return {
+    onKey(e) {
+      if (asking || !/^[1-9]$/.test(e.key) || !people[Number(e.key) - 1]) return false;
+      pick(people[Number(e.key) - 1]);
+      return true;
+    },
+    destroy() { root.onclick = null; },
+  };
+}
+
 function Home(root) {
   const st = Store.stats();
   const next = Store.nextDay();
   const total = Course.days.length;
   const q = Speech.quality();
+  const hola = learner() ? `Hola, ${esc(learner())} · ` : '';
   const parts = [];
 
   if (!settings().onboarded) {
@@ -1269,7 +1378,7 @@ function Home(root) {
     }
     const resume = Store.state.resume && Store.state.resume.id === next.id && Store.state.resume.step > 0;
     parts.push(`<section class="card hero">
-      <span class="kicker">Week ${next.week} of ${Course.weeks.length} · Day ${next.day} of ${total}</span>
+      <span class="kicker">${hola}Week ${next.week} of ${Course.weeks.length} · Day ${next.day} of ${total}</span>
       <h1>${esc(title)}</h1>
       <p class="lead">${esc(lead)}</p>
       <a class="btn primary big" href="#/day/${next.day}">${resume ? 'Continue' : 'Start'} today's session →</a>
@@ -1278,7 +1387,7 @@ function Home(root) {
     </section>`);
   } else {
     parts.push(`<section class="card hero">
-      <span class="kicker">All ${total} days done</span>
+      <span class="kicker">${hola}All ${total} days done</span>
       <h1>You finished the course</h1>
       <p class="lead">Keep the habit: a daily warm-up here, plus real conversations and real listening. The Method page lists where to go next.</p>
       <a class="btn primary big" href="#/day/${total}">Repeat the final mission</a>
@@ -1572,6 +1681,9 @@ function SettingsView(root) {
     const q = Speech.quality();
     // If the saved accent has no voice in this browser, show the one actually in use.
     const active = accents.find((a) => a.toLowerCase() === String(s.accent).toLowerCase()) || (cur.a ? Speech.langOf(cur.a) : '');
+    const me = learner();
+    const each = me ? ', separately for each person' : '';
+    const before = me ? Store.earlier() : null;
     root.innerHTML = `<section class="card">
       <h1>Settings</h1>
       ${q === 'natural' || (q === 'basic' && onPhone) ? '' : `<div class="banner ${q === 'none' ? 'bad' : ''}">${voiceMessage(q)}</div>`}
@@ -1593,16 +1705,20 @@ function SettingsView(root) {
     </section>
     <section class="card">
       <h2>Your progress</h2>
+      ${me ? `<p>You are learning as <strong>${esc(me)}</strong>. <a href="#/who">Change who is learning</a></p>` : ''}
       <p class="muted">${Store.serverOk
-        ? 'Saved in this browser and in the file <code>progress.json</code> in your Spanish folder.'
+        ? `Saved in this browser and in the file <code>progress.json</code> in your Spanish folder${each}.`
         : Store.hosted
-          ? 'Saved in this browser, on this device only. To continue on another device, save a backup file here and load it there. Save a backup now and then: clearing the browser\'s data also clears your progress.'
-          : 'Saved in this browser only. Start Habla with “Start Habla.cmd” to also keep a copy in your Spanish folder.'}</p>
+          ? `Saved in this browser, on this device only${each}. To continue on another device, save a backup file here and load it there. Save a backup now and then: clearing the browser's data also clears the progress.`
+          : `Saved in this browser only${each}. Start Habla with “Start Habla.cmd” to also keep a copy in your Spanish folder.`}</p>
+      ${me ? `<p class="muted">A backup file holds the progress of one person. These buttons only change the progress of ${esc(me)}.</p>` : ''}
       <div class="row left">
         <button class="btn" data-act="export">Save a backup file</button>
         <label class="btn">Load a backup file<input type="file" id="importFile" accept="application/json,.json" hidden></label>
         <button class="btn rate-0" data-act="reset">Start over from day 1</button>
       </div>
+      ${before ? `<p class="muted" style="margin-top:1.2rem">Progress from before the names were added is still on this device: ${plural(before.sessions, 'session')} done, ${plural(before.phrases, 'phrase')} learned.</p>
+        <div class="row left" style="margin-top:0"><button class="btn sm" data-act="take">That progress is mine</button></div>` : ''}
     </section>`;
   }
 
@@ -1623,7 +1739,7 @@ function SettingsView(root) {
         const data = JSON.parse(text);
         if (!data || typeof data !== 'object' || !data.cards || !data.done) throw new Error('not a Habla backup');
         Store.replace(data);
-        toast('Backup loaded.');
+        toast(learner() ? `Backup loaded for ${learner()}.` : 'Backup loaded.');
         draw();
       }).catch(() => toast('That file is not a Habla backup.'));
       return;
@@ -1651,13 +1767,25 @@ function SettingsView(root) {
     } else if (act === 'export') {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([JSON.stringify(Store.state, null, 1)], { type: 'application/json' }));
-      a.download = `habla-backup-${Store.today()}.json`;
+      a.download = `habla-backup-${learner() ? `${Store.who.id}-` : ''}${Store.today()}.json`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     } else if (act === 'reset') {
-      if (window.confirm('Delete all progress and start again from day 1? This cannot be undone.')) {
+      const me = learner();
+      const question = me
+        ? `Delete all progress of ${me} and start again from day 1? The other people keep their progress. This cannot be undone.`
+        : 'Delete all progress and start again from day 1? This cannot be undone.';
+      if (window.confirm(question)) {
         Store.reset();
         toast('Progress cleared.');
+        draw();
+      }
+    } else if (act === 'take') {
+      // Normally answered when a name is chosen for the first time. This is the way back after a wrong "No".
+      const mine = Store.summary(Store.who.id);
+      if (!mine.started || window.confirm(`${learner()} already has progress: ${plural(mine.sessions, 'session')} done. Replace it with the progress from before the names were added? This cannot be undone.`)) {
+        Store.takeEarlier();
+        toast(`That progress now belongs to ${learner()}.`);
         draw();
       }
     }
@@ -1756,17 +1884,21 @@ function MethodView(root) {
    Router and start-up
    ===================================================================== */
 
-const ROUTES = { '': Home, day: DayView, phrases: PhrasesView, listen: ListenView, method: MethodView, settings: SettingsView };
+const ROUTES = { '': Home, day: DayView, phrases: PhrasesView, listen: ListenView, method: MethodView, settings: SettingsView, who: WhoView };
 let view = null;
 
 function route() {
   killFlows();
   if (view && view.destroy) view.destroy();
   view = null;
-  const [name = '', arg] = location.hash.replace(/^#\/?/, '').split('/');
+  let [name = '', arg] = location.hash.replace(/^#\/?/, '').split('/');
+  if (!Store.who) name = 'who'; // nobody is chosen yet: ask first, whatever page was asked for
+  else if (name === 'who' && Store.solo) name = ''; // one learner without a name: nothing to choose
   const make = ROUTES[name] || Home;
   document.body.dataset.view = ROUTES[name] ? name || 'home' : 'home';
+  document.body.classList.toggle('nobody', !Store.who);
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.nav === (ROUTES[name] ? name : '')));
+  showWho();
   view = make($('#app'), arg) || null;
 }
 
@@ -1777,6 +1909,12 @@ document.addEventListener('keydown', (e) => {
 });
 
 (async function start() {
+  // The page asks for the list of people but it did not arrive: stop here. Going on
+  // without it would open the course under nobody's name and hide everyone's progress.
+  if (!Array.isArray(window.PROFILES) && document.querySelector('script[src*="data/profiles.js"]')) {
+    $('#app').innerHTML = '<section class="card"><h1>Habla did not load completely</h1><p class="lead">Check your internet connection, then load the page again.</p><div class="row left"><a class="btn primary" href="">Load the page again</a></div></section>';
+    return;
+  }
   await Store.init();
   Speech.init(() => Store.state.settings);
   window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); });

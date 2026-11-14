@@ -79,7 +79,25 @@ weeks.forEach((w, wi) => {
   });
 });
 
+// The people who learn with this copy (data/profiles.js, optional). Progress is saved under the id.
+let people = [];
+const profilesFile = path.join(dataDir, 'profiles.js');
+if (fs.existsSync(profilesFile)) {
+  vm.runInContext(fs.readFileSync(profilesFile, 'utf8'), sandbox, { filename: 'profiles.js' });
+  if (Array.isArray(sandbox.PROFILES)) people = sandbox.PROFILES;
+  else errors.push('profiles.js: PROFILES must be a list of { id, name }');
+  const seenId = new Set();
+  people.forEach((p, i) => {
+    const at = `profiles.js: person ${i + 1}`;
+    if (!p || typeof p.id !== 'string' || !/^[a-z0-9-]+$/.test(p.id)) errors.push(`${at}: id may only use a-z, 0-9 and -`);
+    else if (seenId.has(p.id)) errors.push(`${at}: id "${p.id}" is used twice`);
+    else seenId.add(p.id);
+    if (!p || !isText(p.name)) errors.push(`${at}: missing name`);
+  });
+}
+
 console.log(`${weeks.length} weeks, ${weeks.reduce((n, w) => n + w.lessons.length, 0)} lessons, ${weeks.length * 7} days`);
+console.log(people.length ? `${people.length} people: ${people.map((p) => p && p.name).join(', ')}` : 'no list of people: one learner without a name');
 console.log(`${phrases} phrases (review cards), ${lines} dialogue lines, ${builds} sentence-building prompts`);
 console.log(`about ${words.size} different Spanish word forms`);
 if (warnings.length) console.log(`\n${warnings.length} warning(s):\n  ${warnings.join('\n  ')}`);

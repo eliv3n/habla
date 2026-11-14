@@ -36,11 +36,19 @@ const Course = (() => {
   };
 })();
 
-/* ---------- Progress, settings and spaced repetition ----------
-   Saved in the browser and, when the local server is running, in progress.json
-   next to the app, so progress survives a cleared browser or a different browser. */
+/* ---------- People, progress, settings and spaced repetition ----------
+   Every person in data/profiles.js has their own progress. It is saved in the
+   browser and, when the local server is running, in progress.json next to the
+   app, so it survives a cleared browser or a different browser.
+   There are no passwords: choosing a name only opens that person's progress. */
 const Store = (() => {
+  // Browser storage: KEY.<person id> holds one person's progress. KEY alone is
+  // where progress was kept before there were profiles.
   const KEY = 'habla.progress.v1';
+  const keyOf = (id) => `${KEY}.${id}`;
+  const WHO = 'habla.who';       // the person chosen in this tab (kept for the tab, for one day)
+  const TAKEN = 'habla.earlier'; // who took over the progress from before profiles
+
   // Days until a phrase comes back, by box. Recall it and it moves up a box;
   // miss it and it returns to box 1.
   const BOX_DAYS = [0, 1, 3, 7, 14, 30, 60];
@@ -66,14 +74,40 @@ const Store = (() => {
     resume: null,
   });
 
+  const listed = (Array.isArray(window.PROFILES) ? window.PROFILES : [])
+    .filter((p) => p && /^[a-z0-9-]+$/.test(p.id || '') && typeof p.name === 'string' && p.name.trim())
+    .map((p) => ({ id: p.id, name: p.name.trim() }));
+  const profiles = listed.filter((p, i) => listed.findIndex((x) => x.id === p.id) === i);
+  // Without a list of people the app has one learner with no name and never asks who is
+  // learning. Their progress stays exactly where the app kept it before profiles: under
+  // KEY in the browser, and as the whole progress file. If names are added later, that
+  // progress is the "earlier progress" somebody can take over.
+  const solo = !profiles.length;
+  if (solo) profiles.push({ id: 'me', name: '' });
+
+  let who = null; // the person learning now; null until somebody is chosen
   let state = fresh();
   let serverOk = false;
   let pushTimer = null;
+  // What progress.json holds: everybody's progress, and progress from before profiles.
+  let file = { profiles: {}, earlier: null, taken: '' };
 
   // The progress file only exists when the app is served by tools/serve.ps1 on
   // this computer. On a website, progress stays in the browser.
   const onThisComputer = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
   const hosted = location.protocol.startsWith('http') && !onThisComputer;
+
+  // Browser storage can be full or blocked. Then nothing is remembered, and the app still runs.
+  const LOCAL = 'localStorage';  // kept on this device
+  const TAB = 'sessionStorage';  // kept while this tab is open
+  const get = (box, k) => { try { return window[box].getItem(k); } catch { return null; } };
+  const put = (box, k, v) => { try { window[box].setItem(k, v); } catch { /* full or blocked */ } };
+  const readJson = (k) => {
+    try {
+      const v = JSON.parse(get(LOCAL, k));
+      return v && typeof v === 'object' ? v : null;
+    } catch { return null; }
+  };
 
   function normalize(raw) {
     const base = fresh();
@@ -81,46 +115,139 @@ const Store = (() => {
     return { ...base, ...raw, settings: { ...base.settings, ...(raw.settings || {}) } };
   }
 
-  function readLocal() {
-    try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; }
-  }
+  // The more recently saved of two copies. When they are equally new, the first one.
+  const newer = (a, b) => (!a ? b || null : !b ? a : (b.updated || 0) > (a.updated || 0) ? b : a);
+  const count = (o) => (o && typeof o === 'object' ? Object.keys(o).length : 0);
+  const hasProgress = (s) => !!s && (count(s.done) > 0 || count(s.cards) > 0 || count(s.log) > 0);
 
-  async function init() {
-    const local = readLocal();
-    let remote = null;
-    if (onThisComputer) {
-      try {
-        const r = await fetch('api/progress', { cache: 'no-store' });
-        if (r.ok) { remote = await r.json(); serverOk = true; }
-      } catch { /* no server: browser storage only */ }
+  // progress.json holds { v: 2, profiles: { id: progress }, earlier, taken }.
+  // A file written before profiles existed is one person's progress on its own.
+  function readFile(raw) {
+    if (!raw || typeof raw !== 'object') return { profiles: {}, earlier: null, taken: '' };
+    if (raw.profiles && typeof raw.profiles === 'object') {
+      return { profiles: raw.profiles, earlier: raw.earlier || null, taken: raw.taken || '' };
     }
-    const useRemote = remote && (!local || (remote.updated || 0) >= (local.updated || 0));
-    state = normalize(useRemote ? remote : local);
-    if (!useRemote && local && serverOk) push(false);
+    return { profiles: {}, earlier: raw, taken: '' };
   }
 
-  function push(keepalive) {
+  async function pull() {
+    try {
+      const r = await fetch('api/progress', { cache: 'no-store' });
+      if (!r.ok) return false;
+      const next = readFile(await r.json());
+      // Nothing this page already knows is dropped: for each person the newer copy wins.
+      // (A page still running the app from before profiles can write the old format again.)
+      Object.keys(file.profiles).forEach((id) => { next.profiles[id] = newer(next.profiles[id], file.profiles[id]); });
+      next.earlier = newer(next.earlier, file.earlier);
+      next.taken = next.taken || file.taken;
+      file = next;
+      return true;
+    } catch { return false; } // no server: browser storage only
+  }
+
+  // Where one person's progress is kept: in the browser, and in the file.
+  const slot = (id) => (solo ? KEY : keyOf(id));
+  const inFile = (id) => (solo ? file.earlier : file.profiles[id]);
+  // A person's saved progress, or null if they never practiced here.
+  const stored = (id) => newer(inFile(id), readJson(slot(id)));
+
+  /* Progress from before profiles. It belongs to whoever used the app then, so the
+     app asks instead of guessing, and keeps it until somebody says it is theirs. */
+  const takenBy = () => get(LOCAL, TAKEN) || file.taken || '';
+  function earlierState() {
+    if (solo || takenBy()) return null;
+    const s = newer(file.earlier, readJson(KEY));
+    return hasProgress(s) ? s : null;
+  }
+
+  function fileBody(id, mine) {
+    // One learner and nobody else in the file: the file is their progress, as before profiles.
+    if (solo && !count(file.profiles)) return mine;
+    const body = { v: 2, updated: Date.now(), profiles: { ...file.profiles } };
+    if (solo) {
+      body.earlier = mine;
+      if (file.taken) body.taken = file.taken;
+      return body;
+    }
+    profiles.forEach((p) => {
+      const s = stored(p.id);
+      if (s) body.profiles[p.id] = s;
+    });
+    body.profiles[id] = mine;
+    const taken = takenBy();
+    if (taken) body.taken = taken;
+    // Progress from before profiles stays in the file as it was, also after somebody took it over.
+    const before = newer(file.earlier, readJson(KEY));
+    if (before) body.earlier = before;
+    return body;
+  }
+
+  // Another tab may have saved another person's progress since this page loaded,
+  // so the file is read again first and only this person's part is replaced.
+  async function push(keepalive) {
     clearTimeout(pushTimer);
     pushTimer = null;
-    if (!serverOk) return;
+    if (!serverOk || !who) return;
+    const id = who.id;
+    const mine = state;
+    if (!keepalive) await pull();
+    const body = fileBody(id, mine);
+    file = readFile(body);
     fetch('api/progress', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Habla': '1' },
-      body: JSON.stringify(state),
+      body: JSON.stringify(body),
       keepalive: !!keepalive,
     }).catch(() => {});
   }
 
+  function pushSoon() {
+    if (!serverOk) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => push(false), 800);
+  }
+
   function save() {
+    if (!who) return;
     state.updated = Date.now();
-    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* storage full or blocked */ }
-    if (serverOk) {
-      clearTimeout(pushTimer);
-      pushTimer = setTimeout(() => push(false), 800);
-    }
+    put(LOCAL, slot(who.id), JSON.stringify(state));
+    pushSoon();
   }
 
   window.addEventListener('pagehide', () => { if (pushTimer) push(true); });
+
+  // Open one person's progress. Returns false if there is no such person.
+  function choose(id) {
+    const p = profiles.find((x) => x.id === id);
+    if (!p) return false;
+    if (pushTimer) push(false); // the person who was learning: save their last changes first
+    const mine = readJson(slot(id));
+    const theirs = inFile(id);
+    who = p;
+    state = normalize(newer(theirs, mine));
+    if (!solo) put(TAB, WHO, `${id}|${dateStr()}`);
+    if (mine && (!theirs || (mine.updated || 0) > (theirs.updated || 0))) pushSoon();
+    return true;
+  }
+
+  function takeEarlier() {
+    const s = earlierState();
+    if (!s || !who) return false;
+    state = normalize(s);
+    put(LOCAL, TAKEN, who.id);
+    file.taken = who.id;
+    save();
+    return true;
+  }
+
+  async function init() {
+    if (onThisComputer) serverOk = await pull();
+    if (solo) { choose('me'); return; }
+    // A reload keeps the person chosen in this tab. A new tab, or a new day, asks again,
+    // so nobody practices under another person's name by accident.
+    const [id, day] = String(get(TAB, WHO) || '').split('|');
+    if (id && day === dateStr()) choose(id);
+  }
 
   /* grade: 0 = missed, 1 = almost, 2 = got it */
   function rate(id, grade) {
@@ -182,11 +309,41 @@ const Store = (() => {
     };
   }
 
-  function replace(raw) { state = normalize(raw); save(); }
-  function reset() { state = fresh(); save(); }
+  // How far some saved progress has come: for the list of people, and for progress from before profiles.
+  function describe(s) {
+    const done = (s && s.done) || {};
+    const cards = (s && s.cards) || {};
+    const log = (s && Array.isArray(s.log) && s.log) || [];
+    const next = Course.days.find((d) => !done[d.id]) || null;
+    let last = '';
+    log.forEach((x) => { if (x && x[0] > last) last = x[0]; });
+    Object.keys(cards).forEach((id) => { if (cards[id] && cards[id].t > last) last = cards[id].t; });
+    const daysAgo = last ? Math.round((new Date(`${dateStr()}T12:00`) - new Date(`${last}T12:00`)) / 86400000) : null;
+    return {
+      started: hasProgress(s),
+      day: next ? next.day : null, // the day they are on; null when the course is finished
+      sessions: Course.days.filter((d) => done[d.id]).length,
+      phrases: Object.keys(cards).filter((id) => Course.card(id)).length,
+      daysAgo,
+    };
+  }
+
+  const summary = (id) => describe(who && who.id === id ? state : stored(id));
+  function earlier() {
+    const s = earlierState();
+    return s ? describe(s) : null;
+  }
+
+  function replace(raw) { if (who) { state = normalize(raw); save(); } }
+  function reset() { if (who) { state = fresh(); save(); } }
 
   return {
     init, save, rate, due, complete, nextDay, stats, replace, reset,
+    choose, summary, earlier, takeEarlier,
+    profiles,
+    solo,
+    isNew: (id) => !stored(id),
+    get who() { return who; },
     get state() { return state; },
     get serverOk() { return serverOk; },
     hosted,

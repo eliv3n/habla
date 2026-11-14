@@ -6,19 +6,30 @@ A 12-week course for **listening and speaking only**. It runs on this computer, 
 
 1. Double-click **`Start Habla.cmd`** in this folder.
    A small window opens minimized (the local server) and Microsoft Edge opens the app.
-2. Click **I am ready**, then **Start today's session**.
+2. Choose your name. Click **I am ready**, then **Start today's session**.
 3. When you finish, close the Edge tab and the minimized "Habla server" window.
 
 Use **Microsoft Edge**. It has natural-sounding Spanish voices (Mexico, Spain, Colombia and more). Chrome also works, but its Spanish voices sound robotic. You need to be online, because the voices come from the internet.
 
 The first time you press **Speak**, Edge asks to use your microphone. Allow it if you want the app to check your answers. The microphone check is optional: the course works without it.
 
+## Who is learning
+
+The app starts with the question **Who is learning?** Each person chooses their name and gets their own progress: their place in the course, their review schedule and their settings.
+
+- There are no passwords. Choosing a name is not a login. It only opens that person's progress.
+- The name of the person who is learning is shown at the top right. Click it to change who is learning.
+- A new tab asks again, and so does a new day. This way nobody practices under another person's name by mistake.
+- Progress is kept on the device where the person practices. It does not follow a person to another device by itself. To move it, use the backup file in **Settings**.
+- The names are in `data/profiles.js`. To add a person, add a line there.
+
 ## Online version
 
 The same app is on the web at **https://eliv3n.github.io/habla/**. It works in any modern browser, on a computer or a phone, with nothing to start first.
 
 - Microsoft Edge on a computer has the best Spanish voices. On a phone the app uses the phone's own Spanish voice.
-- Progress on the website is saved in that browser, on that device. It is separate from the copy on this computer. To move it, use **Settings → Save a backup file** on one device and **Load a backup file** on the other.
+- Progress on the website is saved in that browser, on that device, separately for each person. It is separate from the copy on this computer. To move one person's progress, use **Settings → Save a backup file** on one device and **Load a backup file** on the other.
+- Anyone who opens the website sees the names, but never anybody's progress: progress does not leave the device.
 - The website is a public GitHub Pages site. It changes only when the files in this folder are pushed to GitHub.
 
 ## The plan
@@ -73,7 +84,9 @@ The **Method** page inside the app explains why the course is built this way and
 
 ## Your progress
 
-Progress is saved in the browser and in `progress.json` in this folder. To make a backup, open **Settings** and choose **Save a backup file**.
+Progress is saved in the browser and in `progress.json` in this folder, separately for each person. To make a backup of one person's progress, choose their name, open **Settings** and choose **Save a backup file**.
+
+If somebody practiced before the names were added, the app asks each new person once: "Is this progress yours?" The person who says yes continues from there.
 
 ## If something does not work
 
@@ -87,7 +100,7 @@ Progress is saved in the browser and in `progress.json` in this folder. To make 
 
 ## What was tested, and what was not
 
-Tested automatically: complete lesson, review and mission sessions, the review schedule, saving and resuming, the launcher, and real synthetic speech running through a lesson.
+Tested automatically: complete lesson, review and mission sessions, the review schedule, saving and resuming, the launcher, and real synthetic speech running through a lesson. Also the list of people: separate progress for each person, coming back to the same place, and keeping progress from before the names were added.
 
 Not tested: the microphone check with a real human voice. Only you can try that. If it does not work well for you, switch it off: you then say each answer out loud and check it yourself, which is how most audio courses work.
 
@@ -103,7 +116,8 @@ You can ask Claude in this folder to make changes, for example:
 
 - "Add five lessons about my job as a nurse."
 - "The role 'you' is a man (Luis). Change it to a woman."
-- "Read my Day 7 notes in progress.json and make extra practice for the words I was missing."
+- "Read the Day 7 notes in progress.json and make extra practice for the words each person was missing."
+- "Add another person to the list of names."
 
 ## Files
 
@@ -112,6 +126,7 @@ You can ask Claude in this folder to make changes, for example:
 | `Start Habla.cmd` | Starts the app |
 | `index.html`, `css/`, `js/` | The app |
 | `data/` | The 12 weeks of lessons |
+| `data/profiles.js` | The names of the people who learn here |
 | `tools/serve.ps1` | The small local server (Windows PowerShell, already on your computer) |
 | `tools/check-course.js` | Checks the lesson files for mistakes |
-| `progress.json` | Your progress (created when you start) |
+| `progress.json` | Everybody's progress (created when you start) |
