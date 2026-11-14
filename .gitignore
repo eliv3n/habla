@@ -1,0 +1,5 @@
+# Personal progress and local tooling stay on this computer.
+progress.json
+progress.json.tmp
+.claude/
+CLAUDE.md
