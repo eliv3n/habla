@@ -20,13 +20,17 @@ const Speech = (() => {
 
   let checked = !synth; // false until the browser has reported its voices (or had time to)
 
+  // Call a snapshot of the watchers: a watcher may re-render its view, which registers a
+  // new watcher. Iterating the live Set would visit that new one too, and never finish.
+  const notify = () => Array.from(watchers).forEach((fn) => fn());
+
   function refresh() {
     if (!synth) return;
     const list = synth.getVoices() || [];
     if (list.length !== voices.length) {
       voices = list;
       if (voices.some(isEs)) checked = true;
-      watchers.forEach((fn) => fn());
+      notify();
     }
   }
 
@@ -40,7 +44,7 @@ const Speech = (() => {
     setTimeout(() => {
       if (checked) return;
       checked = true;
-      watchers.forEach((fn) => fn());
+      notify();
     }, 3000);
   }
 
