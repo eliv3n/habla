@@ -78,6 +78,7 @@ body[data-view="day"] nav, body.nobody nav { display: none; }
 .person:hover { border-color: var(--accent); }
 .person:active { transform: translateY(1px); }
 .person.on { border-color: var(--accent); background: var(--accent-soft); }
+.person.wait { opacity: 0.45; pointer-events: none; }
 .person .face { width: 4rem; height: 4rem; font-size: 1.7rem; margin-bottom: 0.6rem; }
 .pname { font-weight: 800; font-size: 1.05rem; letter-spacing: 0.08em; text-transform: uppercase; overflow-wrap: anywhere; }
 .pinfo { font-size: 0.92rem; font-weight: 600; }

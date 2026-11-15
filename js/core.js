@@ -64,7 +64,9 @@ const Store = (() => {
   const fresh = () => ({
     v: 1,
     created: dateStr(),
-    updated: 0,
+    updated: 0, // when anything was last saved, settings included
+    at: 0,      // when the progress itself last changed
+    since: 0,   // when this progress was begun again ("Start over", "Load a backup"); 0 = never
     settings: { accent: 'es-MX', voiceA: '', voiceB: '', voiceEn: '', rate: 1, sayEnglish: true, mic: true, onboarded: false },
     done: {},   // day id -> date first completed
     log: [],    // [date, day id, minutes] for every completed session
@@ -160,20 +162,21 @@ const Store = (() => {
     return hasProgress(s) ? s : null;
   }
 
-  function fileBody(id, mine) {
+  function fileBody() {
     // One learner and nobody else in the file: the file is their progress, as before profiles.
-    if (solo && !count(file.profiles)) return mine;
+    if (solo && !count(file.profiles)) return state;
     const body = { v: 2, updated: Date.now(), profiles: { ...file.profiles } };
     if (solo) {
-      body.earlier = mine;
+      body.earlier = state;
       if (file.taken) body.taken = file.taken;
       return body;
     }
+    // Everybody's newest copy. Each save also goes to the browser's storage at once, so
+    // that copy is current for a person who was learning a moment ago, too.
     profiles.forEach((p) => {
-      const s = stored(p.id);
+      const s = who && who.id === p.id ? state : stored(p.id);
       if (s) body.profiles[p.id] = s;
     });
-    body.profiles[id] = mine;
     const taken = takenBy();
     if (taken) body.taken = taken;
     // Progress from before profiles stays in the file as it was, also after somebody took it over.
@@ -183,15 +186,13 @@ const Store = (() => {
   }
 
   // Another tab may have saved another person's progress since this page loaded,
-  // so the file is read again first and only this person's part is replaced.
+  // so the file is read again first and each person keeps their newest copy.
   async function push(keepalive) {
     clearTimeout(pushTimer);
     pushTimer = null;
-    if (!serverOk || !who) return;
-    const id = who.id;
-    const mine = state;
+    if (!serverOk) return;
     if (!keepalive) await pull();
-    const body = fileBody(id, mine);
+    const body = fileBody();
     file = readFile(body);
     fetch('api/progress', {
       method: 'POST',
@@ -207,11 +208,16 @@ const Store = (() => {
     pushTimer = setTimeout(() => push(false), 800);
   }
 
-  function save() {
+  const watchers = new Set(); // told when a person's progress changes, so it can be sent to their other devices
+
+  // progress = false when only settings changed: voices and speed stay on this device.
+  function save(progress = true) {
     if (!who) return;
     state.updated = Date.now();
+    if (progress) state.at = state.updated;
     put(LOCAL, slot(who.id), JSON.stringify(state));
     pushSoon();
+    if (progress) Array.from(watchers).forEach((fn) => fn(who.id));
   }
 
   window.addEventListener('pagehide', () => { if (pushTimer) push(true); });
@@ -334,12 +340,97 @@ const Store = (() => {
     return s ? describe(s) : null;
   }
 
-  function replace(raw) { if (who) { state = normalize(raw); save(); } }
-  function reset() { if (who) { state = fresh(); save(); } }
+  /* ---------- progress shared between devices (the sending is in js/sync.js) ----------
+     Two copies of one person's progress are combined, never simply replaced, so no
+     device loses work: finished days, the session log and phrase reviews are added
+     together. Only "Start over" and "Load a backup" throw away what came before, on
+     every device: they begin a new `since`. Settings are not shared, because voices
+     and the microphone belong to the device. */
+  const era = (s) => (s && s.since) || 0;
+  const stamp = (s) => (s && (s.at || s.updated)) || 0;
+  const pairs = (o) => Object.keys(o || {}).sort().map((k) => [k, o[k]]);
+
+  // Two copies with the same digest hold the same progress.
+  const digest = (s) => (!s ? '' : JSON.stringify([
+    era(s), pairs(s.done), (s.log || []).map((x) => JSON.stringify(x)).sort(),
+    pairs(s.cards).map(([k, c]) => [k, c.b, c.d, c.n, c.l, c.t]), pairs(s.cando), pairs(s.notes), s.resume || null,
+  ]));
+
+  // The review that happened later: more reviews, then the later date.
+  const laterCard = (y, x) => (y.n !== x.n ? y.n > x.n : y.t !== x.t ? y.t > x.t : y.d !== x.d ? y.d > x.d : JSON.stringify(y) > JSON.stringify(x));
+
+  // The same result whichever copy comes first, and combining twice changes nothing more.
+  function combine(a, b) {
+    if (!a || !b) return a || b || null;
+    if (era(a) !== era(b)) return era(a) > era(b) ? a : b;
+    const [old, neu] = (stamp(a) !== stamp(b) ? stamp(a) < stamp(b) : digest(a) < digest(b)) ? [a, b] : [b, a];
+    const done = { ...(old.done || {}) };
+    Object.keys(neu.done || {}).forEach((k) => { if (!done[k] || neu.done[k] < done[k]) done[k] = neu.done[k]; });
+    const seen = new Set();
+    const log = [...(old.log || []), ...(neu.log || [])]
+      .filter((x) => { const k = JSON.stringify(x); return seen.has(k) ? false : !!seen.add(k); })
+      .sort((x, y) => (x[0] !== y[0] ? (x[0] < y[0] ? -1 : 1) : JSON.stringify(x) < JSON.stringify(y) ? -1 : 1));
+    const cards = { ...(old.cards || {}) };
+    Object.keys(neu.cards || {}).forEach((k) => { if (!cards[k] || laterCard(neu.cards[k], cards[k])) cards[k] = neu.cards[k]; });
+    // The unfinished session that was saved last, unless that day is finished by now.
+    const resume = [old.resume, neu.resume].filter(Boolean).sort((x, y) => (x.at || 0) - (y.at || 0)).pop() || null;
+    return {
+      ...neu,
+      since: era(neu),
+      created: [a.created, b.created].filter(Boolean).sort()[0] || neu.created,
+      updated: Math.max(a.updated || 0, b.updated || 0),
+      at: Math.max(stamp(a), stamp(b)),
+      done,
+      log,
+      cards,
+      cando: { ...(old.cando || {}), ...(neu.cando || {}) },
+      notes: { ...(old.notes || {}), ...(neu.notes || {}) },
+      resume: resume && !done[resume.id] ? resume : null,
+    };
+  }
+
+  const beforeKey = (id) => `habla.before.${id}`; // one copy of progress that was replaced, in case it was a mistake
+  const known = (id) => (who && who.id === id ? state : stored(id));
+
+  // What this device knows about a person, without their settings. Null if there is nothing to share.
+  function progress(id) {
+    const s = known(id);
+    if (!s || (!hasProgress(s) && !era(s))) return null;
+    const n = normalize(s);
+    return { v: 1, since: era(n), created: n.created, updated: n.updated, at: stamp(n), done: n.done, log: n.log, cards: n.cards, cando: n.cando, notes: n.notes, resume: n.resume };
+  }
+
+  // Take in what another device knows about a person. Returns true if this device learned something.
+  function absorb(id, theirs) {
+    if (solo || !profiles.some((p) => p.id === id) || !theirs || typeof theirs !== 'object') return false;
+    const mine = known(id);
+    if (!mine && !hasProgress(theirs) && !era(theirs)) return false;
+    const both = combine(mine, theirs);
+    if (mine && digest(both) === digest(mine)) return false;
+    if (mine && era(theirs) > era(mine) && hasProgress(mine)) put(LOCAL, beforeKey(id), JSON.stringify(mine));
+    const next = { ...normalize(both), settings: normalize(mine).settings, updated: Date.now() };
+    if (who && who.id === id) Object.assign(state, next); // the same object: a running session keeps working on it
+    put(LOCAL, slot(id), JSON.stringify(next));
+    pushSoon();
+    return true;
+  }
+
+  // "Start over" and "Load a backup" replace the progress on every device.
+  function begin(next) {
+    if (!who) return;
+    if (hasProgress(state)) put(LOCAL, beforeKey(who.id), JSON.stringify(state));
+    state = { ...next, since: Date.now() };
+    save();
+  }
+  const replace = (raw) => begin(normalize(raw));
+  const reset = () => begin(fresh());
 
   return {
     init, save, rate, due, complete, nextDay, stats, replace, reset,
     choose, summary, earlier, takeEarlier,
+    saveSettings: () => save(false),
+    progress, absorb, combine, digest,
+    watch(fn) { watchers.add(fn); return () => watchers.delete(fn); },
     profiles,
     solo,
     isNew: (id) => !stored(id),

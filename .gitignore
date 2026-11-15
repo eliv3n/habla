@@ -1,5 +1,9 @@
 # Personal progress and local tooling stay on this computer.
 progress.json
 progress.json.tmp
+# The family link is the key to the family's shared progress. Never publish it.
+family-link.txt
+# Browser test scripts: they are run from a copy outside this folder.
+tests/
 .claude/
 CLAUDE.md

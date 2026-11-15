@@ -96,8 +96,25 @@ if (fs.existsSync(profilesFile)) {
   });
 }
 
+// Where progress goes between devices (data/sync.js, optional). Whether the relays answer
+// is a different question: node tools/check-relays.mjs
+let relays = [];
+const syncFile = path.join(dataDir, 'sync.js');
+if (fs.existsSync(syncFile)) {
+  vm.runInContext(fs.readFileSync(syncFile, 'utf8'), sandbox, { filename: 'sync.js' });
+  const cfg = sandbox.SYNC || {};
+  if (Array.isArray(cfg.relays)) relays = cfg.relays;
+  else errors.push('sync.js: SYNC.relays must be a list of relay addresses');
+  relays.forEach((u, i) => {
+    if (typeof u !== 'string' || !/^wss:\/\/[^\s/]+\S*$/.test(u)) errors.push(`sync.js: relay ${i + 1} must be an address that starts with wss://`);
+    else if (relays.indexOf(u) !== i) errors.push(`sync.js: relay ${u} is listed twice`);
+  });
+  if (typeof cfg.site !== 'string' || !/^https:\/\/\S+\/$/.test(cfg.site)) errors.push('sync.js: SYNC.site must be the address of the website, starting with https:// and ending with /');
+}
+
 console.log(`${weeks.length} weeks, ${weeks.reduce((n, w) => n + w.lessons.length, 0)} lessons, ${weeks.length * 7} days`);
 console.log(people.length ? `${people.length} people: ${people.map((p) => p && p.name).join(', ')}` : 'no list of people: one learner without a name');
+console.log(relays.length ? `progress can follow a person between devices, through ${relays.length} relays` : 'no relays: progress stays on each device');
 console.log(`${phrases} phrases (review cards), ${lines} dialogue lines, ${builds} sentence-building prompts`);
 console.log(`about ${words.size} different Spanish word forms`);
 if (warnings.length) console.log(`\n${warnings.length} warning(s):\n  ${warnings.join('\n  ')}`);

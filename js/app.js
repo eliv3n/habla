@@ -9,6 +9,10 @@ const flat = (s) => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const settings = () => Store.state.settings;
 const voiceOf = (speaker) => (speaker === 'B' ? 'b' : 'a');
+// Progress that follows a person from device to device (js/sync.js). Null when this
+// browser cannot do it, or when the page is one from before it existed.
+const sync = typeof Sync !== 'undefined' && Sync.available ? Sync : null;
+const shared = () => !!sync && sync.linked();
 
 function shuffle(list) {
   const a = list.slice();
@@ -1246,16 +1250,38 @@ function showWho() {
 function WhoView(root) {
   const people = Store.profiles;
   const total = Course.days.length;
-  let asking = null; // the person being asked whether the progress from before profiles is theirs
+  let asking = null;  // the person being asked whether the progress from before profiles is theirs
+  let opening = null; // the person whose progress is being fetched from their other devices
+  let shown = '';
+  let gone = false;
 
   const where = (s) => (!s.started ? 'Not started yet' : s.day == null ? 'Course finished' : `Day ${s.day} of ${total}`);
   const when = (s) => (!s.started || s.daysAgo == null ? ''
     : s.daysAgo <= 0 ? 'Practiced today' : s.daysAgo === 1 ? 'Practiced yesterday' : `Practiced ${s.daysAgo} days ago`);
 
+  // Where the progress on this screen is kept.
+  function footnote() {
+    const here = 'Progress is saved on this device, separately for each person. There are no passwords.';
+    if (!sync) return here;
+    if (!sync.linked()) return `${here} This device is not connected to the family. To have progress follow each person from device to device, open the family link on this device.`;
+    const s = sync.status();
+    if (s.okAt) return 'This device is connected to the family: progress follows each person from device to device. There are no passwords.';
+    if (s.busy) return 'Getting the latest progress from the other devices…';
+    return 'The other devices cannot be reached right now. This shows what this device has.';
+  }
+
+  // Redraws only when something on the screen changes, so a tap is not lost to a redraw.
   function draw() {
+    const html = page();
+    if (html === shown) return;
+    shown = html;
+    root.innerHTML = html;
+  }
+
+  function page() {
     const before = asking ? Store.earlier() : null;
     if (asking && before) {
-      root.innerHTML = `<section class="card who-card">
+      return `<section class="card who-card">
         <span class="kicker">One question for ${esc(asking.name)}</span>
         <h1>Is this progress yours?</h1>
         <p class="lead">Somebody practiced on this device before the names were added: ${plural(before.sessions, 'session')} done, ${plural(before.phrases, 'phrase')} learned.</p>
@@ -1266,26 +1292,26 @@ function WhoView(root) {
         <p class="small muted" style="margin-top:1rem">If it is not yours, it stays on this device for the person it belongs to.</p>
         <div class="row left"><button class="btn ghost sm" data-act="names">← Back to the names</button></div>
       </section>`;
-      return;
     }
     asking = null;
     const now = Store.who;
-    root.innerHTML = `<section class="card who-card">
+    return `<section class="card who-card">
       <span class="kicker">Habla · Spanish in 30 minutes a day</span>
       <h1>Who is learning?</h1>
       <p class="lead">${now ? 'Choose a name to change who is learning.' : 'Choose your name. Your own progress opens, and you continue where you stopped.'}</p>
       <div class="people">${people.map((p, i) => {
         const s = Store.summary(p.id);
         const here = !!now && now.id === p.id;
-        return `<button class="person ${here ? 'on' : ''}" data-who="${esc(p.id)}">
+        const mine = !!opening && opening.id === p.id;
+        return `<button class="person ${here ? 'on' : ''} ${opening && !mine ? 'wait' : ''}" data-who="${esc(p.id)}">
           ${faceOf(p)}
           <span class="pname">${esc(p.name)}</span>
           <span class="pinfo">${where(s)}</span>
-          <span class="plast">${here ? 'Learning now' : when(s)}</span>
+          <span class="plast">${mine ? 'Opening…' : here ? 'Learning now' : when(s)}</span>
           ${i < 9 ? `<kbd>${i + 1}</kbd>` : ''}
         </button>`;
       }).join('')}</div>
-      <p class="small muted">Progress is saved on this device, separately for each person. There are no passwords.</p>
+      <p class="small muted">${esc(footnote())}</p>
     </section>`;
   }
 
@@ -1301,8 +1327,17 @@ function WhoView(root) {
     else route();
   }
 
-  function pick(p) {
-    if (!p) return;
+  async function pick(p) {
+    if (!p || opening) return;
+    if (shared()) {
+      // First get what this person did on their other devices, so they continue from there.
+      opening = p;
+      draw();
+      const reached = await sync.upToDate(p.id);
+      opening = null;
+      if (gone) return;
+      if (!reached) toast('The other devices could not be reached. You can practice: this device keeps your progress and sends it later.');
+    }
     if (Store.isNew(p.id) && Store.earlier()) {
       asking = p;
       draw();
@@ -1322,14 +1357,15 @@ function WhoView(root) {
     else if (b.dataset.act === 'names') { asking = null; draw(); }
   };
 
+  const offSync = sync ? sync.watch(() => { if (!gone) draw(); }) : null;
   draw();
   return {
     onKey(e) {
-      if (asking || !/^[1-9]$/.test(e.key) || !people[Number(e.key) - 1]) return false;
+      if (asking || opening || !/^[1-9]$/.test(e.key) || !people[Number(e.key) - 1]) return false;
       pick(people[Number(e.key) - 1]);
       return true;
     },
-    destroy() { root.onclick = null; },
+    destroy() { gone = true; if (offSync) offSync(); root.onclick = null; },
   };
 }
 
@@ -1420,12 +1456,14 @@ function Home(root) {
       Speech.say('Hola. Bienvenido a Habla. Vamos a hablar español.', 'a');
     } else if (b.dataset.act === 'onboard') {
       settings().onboarded = true;
-      Store.save();
+      Store.saveSettings();
       route();
     }
   };
   const off = Speech.onVoices(() => route());
-  return { destroy() { off(); root.onclick = null; } };
+  // Another device sent newer progress while this page was open: show it.
+  const offSync = sync ? sync.watch((learned) => { if (learned) route(); }) : null;
+  return { destroy() { off(); if (offSync) offSync(); root.onclick = null; } };
 }
 
 function DayView(root, arg) {
@@ -1444,7 +1482,7 @@ function DayView(root, arg) {
   const saved = Store.state.resume;
   if (saved && saved.id === day.id && saved.step < steps.length) { i = saved.step; seconds = saved.sec || 0; }
 
-  const saveResume = () => { Store.state.resume = { id: day.id, step: i, sec: seconds }; Store.save(); };
+  const saveResume = () => { Store.state.resume = { id: day.id, step: i, sec: seconds, at: Date.now() }; Store.save(); };
 
   const tick = setInterval(() => {
     if (finished || document.visibilityState !== 'visible') return;
@@ -1509,6 +1547,7 @@ function DayView(root, arg) {
     comp = null;
     const minutes = Math.max(1, Math.round(seconds / 60));
     Store.complete(day.id, minutes);
+    if (sync) sync.flush(); // a finished day goes to the other devices at once
     const next = Store.nextDay();
     const st = Store.stats();
     root.innerHTML = `<section class="card center">
@@ -1540,6 +1579,7 @@ function DayView(root, arg) {
       clearInterval(tick);
       keepAwake(false);
       if (!finished) saveResume();
+      if (sync) sync.flush(); // leaving a session: the place in it goes to the other devices
       if (comp && comp.destroy) comp.destroy();
       root.onclick = null;
     },
@@ -1671,6 +1711,16 @@ function ListenView(root) {
 function SettingsView(root) {
   let micResult = '';
 
+  // How the last exchange with the family's other devices went.
+  function contact() {
+    const s = sync.status();
+    if (s.busy) return 'Talking to the other devices now…';
+    if (s.failAt) return 'The other devices could not be reached. Check the internet connection. Progress stays safe on this device and is sent later.';
+    if (!s.okAt) return 'No contact with the other devices yet.';
+    const min = Math.round((Date.now() - s.okAt) / 60000);
+    return `Last contact with the other devices: ${min < 1 ? 'just now' : min < 60 ? `${plural(min, 'minute')} ago` : 'more than an hour ago'}.`;
+  }
+
   function draw() {
     const s = settings();
     const es = Speech.esVoices();
@@ -1709,9 +1759,11 @@ function SettingsView(root) {
       <p class="muted">${Store.serverOk
         ? `Saved in this browser and in the file <code>progress.json</code> in your Spanish folder${each}.`
         : Store.hosted
-          ? `Saved in this browser, on this device only${each}. To continue on another device, save a backup file here and load it there. Save a backup now and then: clearing the browser's data also clears the progress.`
+          ? shared()
+            ? `Saved in this browser${each}, and on the other connected devices of the family.`
+            : `Saved in this browser, on this device only${each}. To continue on another device, save a backup file here and load it there. Save a backup now and then: clearing the browser's data also clears the progress.`
           : `Saved in this browser only${each}. Start Habla with “Start Habla.cmd” to also keep a copy in your Spanish folder.`}</p>
-      ${me ? `<p class="muted">A backup file holds the progress of one person. These buttons only change the progress of ${esc(me)}.</p>` : ''}
+      ${me ? `<p class="muted">A backup file holds the progress of one person. These buttons only change the progress of ${esc(me)}${shared() ? ', on every connected device' : ''}.</p>` : ''}
       <div class="row left">
         <button class="btn" data-act="export">Save a backup file</button>
         <label class="btn">Load a backup file<input type="file" id="importFile" accept="application/json,.json" hidden></label>
@@ -1719,7 +1771,21 @@ function SettingsView(root) {
       </div>
       ${before ? `<p class="muted" style="margin-top:1.2rem">Progress from before the names were added is still on this device: ${plural(before.sessions, 'session')} done, ${plural(before.phrases, 'phrase')} learned.</p>
         <div class="row left" style="margin-top:0"><button class="btn sm" data-act="take">That progress is mine</button></div>` : ''}
-    </section>`;
+    </section>
+    ${!sync ? '' : `<section class="card">
+      <h2>Other devices</h2>
+      ${shared() ? `<p>This device is connected to the family. Progress follows each person from device to device.</p>
+        <p class="muted" id="contact">${esc(contact())}</p>
+        <p class="muted">To connect another device, open the family link on it once. The link is the key to the progress of the whole family, so keep it inside the family. Progress leaves this device sealed: only a device with the link can read it.</p>
+        <div class="row left">
+          <button class="btn" data-act="copylink">Copy the family link</button>
+          ${navigator.share ? '<button class="btn" data-act="sharelink">Send the family link</button>' : ''}
+          <button class="btn" data-act="syncnow">Update now</button>
+          <button class="btn rate-0" data-act="unlink">Disconnect this device</button>
+        </div>`
+    : `<p>This device is not connected to the family, so progress stays on this device.</p>
+        <p class="muted">To connect it, open the family link on this device once. Somebody in the family has the link. After that, progress follows each person from device to device.</p>`}
+    </section>`}`;
   }
 
   root.onchange = (e) => {
@@ -1744,7 +1810,7 @@ function SettingsView(root) {
       }).catch(() => toast('That file is not a Habla backup.'));
       return;
     } else return;
-    Store.save();
+    Store.saveSettings();
     draw();
   };
 
@@ -1773,7 +1839,7 @@ function SettingsView(root) {
     } else if (act === 'reset') {
       const me = learner();
       const question = me
-        ? `Delete all progress of ${me} and start again from day 1? The other people keep their progress. This cannot be undone.`
+        ? `Delete all progress of ${me}${shared() ? ' on every connected device' : ''} and start again from day 1? The other people keep their progress. This cannot be undone.`
         : 'Delete all progress and start again from day 1? This cannot be undone.';
       if (window.confirm(question)) {
         Store.reset();
@@ -1788,12 +1854,30 @@ function SettingsView(root) {
         toast(`That progress now belongs to ${learner()}.`);
         draw();
       }
+    } else if (act === 'copylink') {
+      const link = sync.address();
+      const byHand = () => window.prompt('Copy the family link:', link);
+      if (navigator.clipboard) navigator.clipboard.writeText(link).then(() => toast('Family link copied. Open it once on the other device.'), byHand);
+      else byHand();
+    } else if (act === 'sharelink') {
+      navigator.share({ title: 'Habla', text: 'Our family link for Habla. Open it once on your device.', url: sync.address() }).catch(() => {});
+    } else if (act === 'syncnow') {
+      sync.pull();
+    } else if (act === 'unlink') {
+      if (window.confirm('Disconnect this device from the family? The progress stays on this device, but stops following you to other devices.')) {
+        sync.unlink();
+        toast('This device is disconnected from the family.');
+        draw();
+      }
     }
   };
 
   const off = Speech.onVoices(draw);
+  // Only the line about the last contact changes while this page is open: redrawing
+  // the whole page would take a slider or a list out of the user's hand.
+  const offSync = sync ? sync.watch(() => { const line = $('#contact', root); if (line) line.textContent = contact(); }) : null;
   draw();
-  return { destroy() { off(); root.onchange = null; root.onclick = null; } };
+  return { destroy() { off(); if (offSync) offSync(); root.onchange = null; root.onclick = null; } };
 }
 
 function MethodView(root) {
@@ -1902,6 +1986,22 @@ function route() {
   view = make($('#app'), arg) || null;
 }
 
+// Connect this device to the family if the address is the family link (or, on this
+// computer, if the link is in the folder), then fetch what the other devices know.
+async function joinFamily() {
+  if (typeof Sync === 'undefined') return; // a page from before this existed: leave the address alone
+  const asked = /^#family=/.test(location.hash);
+  const how = sync ? await sync.start() : '';
+  if (how === 'joined') toast('This device is now connected to the family. Progress follows each person from device to device.');
+  else if (how === 'same') toast('This device is already connected to the family.');
+  else if (asked && !sync) toast('This browser cannot connect to the family. Progress stays on this device.');
+  else if (asked && how === '') toast('That family link is not complete. Copy the whole link and open it again.');
+  if (/^#family=/.test(location.hash)) {
+    try { history.replaceState(null, '', location.pathname + location.search); } catch { /* the address stays as it is */ }
+  }
+  if (sync) sync.pull();
+}
+
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.target.matches && e.target.matches('input, textarea, select')) return;
@@ -1917,6 +2017,11 @@ document.addEventListener('keydown', (e) => {
   }
   await Store.init();
   Speech.init(() => Store.state.settings);
-  window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); });
+  await joinFamily();
+  window.addEventListener('hashchange', async () => {
+    if (/^#family=/.test(location.hash)) await joinFamily(); // the family link, opened in a tab that is already open
+    route();
+    window.scrollTo(0, 0);
+  });
   route();
 })();
